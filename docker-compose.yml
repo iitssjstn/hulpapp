@@ -1,0 +1,14 @@
+services:
+  hulpapp:
+    image: ghcr.io/iitssjstn/hulpapp:latest
+    container_name: hulpapp
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Europe/Amsterdam
+    volumes:
+      - hulpapp-data:/data
+
+volumes:
+  hulpapp-data:

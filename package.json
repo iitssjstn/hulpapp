@@ -1,0 +1,18 @@
+{
+  "name": "hulpapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kleine vraag-en-antwoord site voor je eigen omgeving, met Discord meldingen.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
