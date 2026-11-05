@@ -56,7 +56,7 @@ function render(req, res, title, body, opts = {}) {
     unread = req.user.role === 'owner' ? unreadStmtOwner.get().n : unreadStmtUser.get(req.user.id).n;
   }
   res.status(opts.status || 200).type('html').send(
-    V.layout({ title, user: req.user, csrf: req.csrf, flash: res.locals.flash, body, narrow: opts.narrow, unread })
+    V.layout({ title, user: req.user, csrf: req.csrf, flash: res.locals.flash, body, narrow: opts.narrow, wide: opts.wide, unread, path: req.path })
   );
 }
 
@@ -169,26 +169,43 @@ app.post('/register/:code', (req, res) => {
   res.redirect('/');
 });
 
-// ---------- dashboard ----------
+// ---------- chat-overzicht ----------
 const QUESTION_SELECT = `
   SELECT q.*, u.display_name AS asker_name,
-    (SELECT COUNT(*) FROM messages m WHERE m.question_id = q.id) AS message_count
+    (SELECT COUNT(*) FROM messages m WHERE m.question_id = q.id) AS message_count,
+    (SELECT m.body FROM messages m WHERE m.question_id = q.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+    (SELECT m.user_id FROM messages m WHERE m.question_id = q.id ORDER BY m.id DESC LIMIT 1) AS last_user_id
   FROM questions q LEFT JOIN users u ON u.id = q.user_id`;
 
-app.get('/', requireAuth, (req, res) => {
+function loadSidebar(req) {
   const isOwner = req.user.role === 'owner';
   let questions, filter = 'open', counts = {};
   if (isOwner) {
     filter = ['open', 'closed', 'all'].includes(req.query.status) ? req.query.status : 'open';
     const where = filter === 'all' ? '' : 'WHERE q.status = ?';
     const args = filter === 'all' ? [] : [filter];
-    questions = db.prepare(`${QUESTION_SELECT} ${where} ORDER BY q.owner_unread DESC, q.updated_at DESC LIMIT 500`).all(...args);
+    questions = db.prepare(`${QUESTION_SELECT} ${where} ORDER BY q.updated_at DESC LIMIT 300`).all(...args);
     const c = db.prepare("SELECT SUM(status='open') AS open, SUM(status='closed') AS closed, COUNT(*) AS total FROM questions").get();
     counts = { open: c.open || 0, closed: c.closed || 0, all: c.total || 0 };
   } else {
-    questions = db.prepare(`${QUESTION_SELECT} WHERE q.user_id = ? ORDER BY q.updated_at DESC LIMIT 500`).all(req.user.id);
+    questions = db.prepare(`${QUESTION_SELECT} WHERE q.user_id = ? ORDER BY q.updated_at DESC LIMIT 300`).all(req.user.id);
   }
-  render(req, res, null, V.dashboardPage({ user: req.user, csrf: req.csrf, questions, filter, counts }));
+  return { questions, filter, counts };
+}
+
+app.get('/', requireAuth, (req, res) => {
+  const side = loadSidebar(req);
+  // Gebruiker zonder gesprekken: meteen het vraagformulier tonen
+  const mode = req.user.role !== 'owner' && side.questions.length === 0 ? 'new' : 'empty';
+  render(req, res, null, V.chatPage({ user: req.user, csrf: req.csrf, ...side, mode }), { wide: true });
+});
+
+app.get('/new', requireAuth, (req, res) => {
+  render(req, res, 'Nieuwe vraag', V.chatPage({ user: req.user, csrf: req.csrf, ...loadSidebar(req), mode: 'new' }), { wide: true });
+});
+
+app.get('/privacy', (req, res) => {
+  render(req, res, 'Privacy', V.privacyPage({ siteName: getSetting('site_name', 'Hulpapp') }), { narrow: true });
 });
 
 // ---------- vragen ----------
@@ -244,7 +261,8 @@ app.get('/questions/:id', requireAuth, (req, res) => {
     WHERE m.question_id = ? ORDER BY m.created_at, m.id`).all(q.id);
   if (req.user.role === 'owner' && q.owner_unread) db.prepare('UPDATE questions SET owner_unread = 0 WHERE id = ?').run(q.id);
   if (q.user_id === req.user.id && q.user_unread) db.prepare('UPDATE questions SET user_unread = 0 WHERE id = ?').run(q.id);
-  render(req, res, q.title, V.questionPage({ user: req.user, csrf: req.csrf, question: q, messages }));
+  const side = loadSidebar(req);
+  render(req, res, q.title, V.chatPage({ user: req.user, csrf: req.csrf, ...side, mode: 'chat', question: q, messages }), { wide: true });
 });
 
 app.post('/questions/:id/reply', requireAuth, (req, res) => {
@@ -330,6 +348,7 @@ app.post('/account/password', requireAuth, (req, res) => {
 function currentSettings() {
   return {
     site_name: getSetting('site_name', 'Hulpapp'),
+    site_tagline: getSetting('site_tagline', 'Hulp en Ondersteuning'),
     public_url: getSetting('public_url'),
     has_webhook: !!getSetting('discord_webhook'),
     discord_ping_id: getSetting('discord_ping_id'),
@@ -361,6 +380,7 @@ app.post('/admin/settings', requireOwner, (req, res) => {
   }
 
   setSetting('site_name', siteName);
+  setSetting('site_tagline', String(b.site_tagline || '').trim().slice(0, 80));
   setSetting('public_url', publicUrl);
   if (b.clear_webhook === '1') setSetting('discord_webhook', '');
   else if (webhook) setSetting('discord_webhook', webhook);

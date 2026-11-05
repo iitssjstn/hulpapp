@@ -21,10 +21,33 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-// Ctrl/Cmd + Enter verstuurt een formulier vanuit een tekstvak
+// Menu (⋯) sluiten bij klik ernaast
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.menu[open]').forEach((d) => {
+    if (!d.contains(e.target)) d.removeAttribute('open');
+  });
+});
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.tagName === 'TEXTAREA') {
+  if (e.key !== 'Enter' || e.target.tagName !== 'TEXTAREA') return;
+  const inComposer = !!e.target.closest('.composer');
+  // In de chat: Enter = versturen, Shift+Enter = nieuwe regel. Elders: Ctrl/Cmd+Enter.
+  if ((inComposer && !e.shiftKey && !e.isComposing) || e.ctrlKey || e.metaKey) {
     e.preventDefault();
-    e.target.form.requestSubmit();
+    if (e.target.value.trim()) e.target.form.requestSubmit();
   }
 });
+
+// Chat: naar onderen scrollen en tekstvak laten meegroeien
+const messages = document.getElementById('messages');
+if (messages) messages.scrollTop = messages.scrollHeight;
+
+const composer = document.querySelector('.composer textarea');
+if (composer) {
+  const grow = () => {
+    composer.style.height = 'auto';
+    composer.style.height = Math.min(composer.scrollHeight, 180) + 'px';
+  };
+  composer.addEventListener('input', grow);
+  if (!document.querySelector('.flash-error')) composer.focus({ preventScroll: true });
+}

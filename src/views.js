@@ -1,7 +1,10 @@
 import { html, raw, fmtDate, timeAgo } from './html.js';
 import { getSetting } from './db.js';
 
-const csrfField = (csrf) => html`<input type="hidden" name="_csrf" value="${csrf}">`;
+// Verandert bij elke herstart, zodat browsers na een update nieuwe CSS/JS ophalen
+const ASSET_V = Date.now().toString(36);
+
+const csrfField =(csrf) => html`<input type="hidden" name="_csrf" value="${csrf}">`;
 
 function flashBox(flash) {
   if (!flash) return '';
@@ -10,14 +13,28 @@ function flashBox(flash) {
   }</div>`;
 }
 
-export function layout({ title, user, csrf, flash, body, narrow = false, unread = 0 }) {
+function activeSection(p = '') {
+  if (p === '/' || p === '/new' || p.startsWith('/questions')) return 'questions';
+  if (p.startsWith('/admin/users')) return 'users';
+  if (p.startsWith('/admin/settings')) return 'settings';
+  if (p.startsWith('/account')) return 'account';
+  return '';
+}
+
+const ICON_BUBBLE = raw('<svg class="icon-bubble" viewBox="0 0 48 48" width="44" height="44" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"><path d="M24 7C13.5 7 6 13.6 6 21.5c0 4.4 2.3 8.3 6 11l-1.8 7.8 8.4-4.6c1.7.4 3.5.6 5.4.6 10.5 0 18-6.6 18-14.8S34.5 7 24 7z"/></svg>');
+const ICON_PLUS = raw('<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M10 4v12M4 10h12"/></svg>');
+
+export function layout({ title, user, csrf, flash, body, narrow = false, wide = false, unread = 0, path = '' }) {
   const siteName = getSetting('site_name', 'Hulpapp');
+  const tagline = getSetting('site_tagline', 'Hulp en Ondersteuning');
+  const active = activeSection(path);
+  const link = (href, key, label) => html`<a href="${href}" class="${active === key ? 'active' : ''}">${label}</a>`;
   const nav = user
     ? html`
       <nav class="nav">
-        <a href="/">${user.role === 'owner' ? 'Vragen' : 'Mijn vragen'}${unread ? html` <span class="badge">${unread}</span>` : ''}</a>
-        ${user.role === 'owner' ? html`<a href="/admin/users">Gebruikers</a><a href="/admin/settings">Instellingen</a>` : ''}
-        <a href="/account">${user.displayName}</a>
+        ${link('/', 'questions', html`${user.role === 'owner' ? 'Vragen' : 'Mijn vragen'}${unread ? html` <span class="badge">${unread}</span>` : ''}`)}
+        ${user.role === 'owner' ? html`${link('/admin/users', 'users', 'Gebruikers')}${link('/admin/settings', 'settings', 'Instellingen')}` : ''}
+        ${link('/account', 'account', user.displayName)}
         <form method="post" action="/logout" class="inline">${csrfField(csrf)}<button class="linklike">Uitloggen</button></form>
       </nav>`
     : '';
@@ -27,9 +44,9 @@ export function layout({ title, user, csrf, flash, body, narrow = false, unread 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title ? `${title} · ${siteName}` : siteName}</title>
-  <link rel="stylesheet" href="/public/style.css">
+  <link rel="stylesheet" href="/public/style.css?v=${ASSET_V}">
   <link rel="icon" href="/public/icon.svg" type="image/svg+xml">
-  <script src="/public/app.js" defer></script>
+  <script src="/public/app.js?v=${ASSET_V}" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -38,10 +55,14 @@ export function layout({ title, user, csrf, flash, body, narrow = false, unread 
       ${nav}
     </div>
   </header>
-  <main class="wrap ${narrow ? 'narrow' : ''}">
+  <main class="wrap ${narrow ? 'narrow' : ''} ${wide ? 'wide' : ''}">
     ${flashBox(flash)}
     ${body}
   </main>
+  <footer class="wrap footer ${wide ? 'wide' : ''}">
+    <p>© ${new Date().getFullYear()} ${siteName}${tagline ? ` - ${tagline}` : ''}</p>
+    <a href="/privacy">Privacy</a>
+  </footer>
 </body>
 </html>`.s;
 }
@@ -101,101 +122,188 @@ export function registerPage({ code, error, values = {}, invalid }) {
     </section>`;
 }
 
-// ---------- vragen ----------
+// ---------- vragen (chat-weergave) ----------
 function statusPill(status) {
   return status === 'open'
     ? html`<span class="pill pill-open">Open</span>`
     : html`<span class="pill pill-closed">Afgerond</span>`;
 }
 
-function questionList(questions, { isOwner }) {
-  if (!questions.length) return html`<p class="empty">Nog geen vragen hier.</p>`;
-  return html`<ul class="qlist">${questions.map((q) => {
+function initials(name = '?') {
+  const parts = String(name || '?').trim().split(/\s+/).filter(Boolean);
+  const s = parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : (parts[0] || '?').slice(0, 2);
+  return s.toUpperCase();
+}
+
+const avatar = (name, id) => html`<span class="avatar av-${Math.abs(Number(id) || 0) % 6}" aria-hidden="true">${initials(name)}</span>`;
+
+const ICON_SEND = raw('<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3.3 10.2 15 12 3.3 13.8z"/></svg>');
+
+const TZ = process.env.TZ || 'Europe/Amsterdam';
+const timeFmt = new Intl.DateTimeFormat('nl-NL', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
+const dayFmt = new Intl.DateTimeFormat('nl-NL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TZ });
+const fmtTime = (ms) => timeFmt.format(new Date(ms));
+const fmtDay = (ms) => dayFmt.format(new Date(ms));
+
+function chatList({ user, questions, activeId, filter }) {
+  const isOwner = user.role === 'owner';
+  const qs = isOwner && filter && filter !== 'open' ? `?status=${filter}` : '';
+  if (!questions.length) {
+    return html`<div class="chatlist-empty"><p>Nog geen vragen hier.</p>${ICON_BUBBLE}</div>`;
+  }
+  return html`<ul class="chatlist">${questions.map((q) => {
     const unread = isOwner ? q.owner_unread : q.user_unread;
-    return html`<li class="${unread ? 'unread' : ''}">
-      <a href="/questions/${q.id}">
-        <div class="qtitle">${unread ? html`<span class="dot" title="Nieuw"></span>` : ''}${q.title}</div>
-        <div class="qmeta">
-          ${statusPill(q.status)}
-          ${isOwner ? html`<span>${q.asker_name || 'verwijderde gebruiker'}</span>` : ''}
-          <span>${q.message_count} ${q.message_count === 1 ? 'bericht' : 'berichten'}</span>
-          <span title="${fmtDate(q.updated_at)}">${timeAgo(q.updated_at)}</span>
-        </div>
+    const name = isOwner ? (q.asker_name || 'verwijderde gebruiker') : q.title;
+    const preview = (q.last_user_id === user.id ? 'Jij: ' : '') + (q.last_body || '');
+    return html`<li>
+      <a href="/questions/${q.id}${qs}" class="chatitem ${q.id === activeId ? 'active' : ''} ${unread ? 'unread' : ''}">
+        ${avatar(isOwner ? q.asker_name : q.title, isOwner ? q.user_id : q.id)}
+        <span class="chatitem-main">
+          <span class="chatitem-top">
+            <span class="chatitem-name">${name}</span>
+            <time title="${fmtDate(q.updated_at)}">${timeAgo(q.updated_at)}</time>
+          </span>
+          ${isOwner ? html`<span class="chatitem-title">${q.title}</span>` : ''}
+          <span class="chatitem-preview">${preview}</span>
+        </span>
+        ${unread ? html`<span class="dot" title="Nieuw"></span>` : q.status === 'closed' ? html`<span class="check" title="Afgerond">✓</span>` : ''}
       </a>
     </li>`;
   })}</ul>`;
 }
 
-export function newQuestionForm(csrf, values = {}) {
-  return html`
-    <form method="post" action="/questions" class="card stack">
-      ${csrfField(csrf)}
-      <h2>Stel een vraag</h2>
-      <label>Onderwerp<input name="title" required maxlength="150" value="${values.title || ''}" placeholder="Waar gaat het over?"></label>
-      <label>Je vraag<textarea name="body" required maxlength="10000" rows="5" placeholder="Leg zo goed mogelijk uit wat je wilt weten…">${values.body || ''}</textarea></label>
-      <div><button class="btn primary">Versturen</button></div>
-    </form>`;
-}
-
-export function dashboardPage({ user, csrf, questions, filter, counts }) {
+function sidebar({ user, questions, activeId, filter, counts }) {
   const isOwner = user.role === 'owner';
-  if (isOwner) {
-    const tab = (key, label) =>
-      html`<a href="/?status=${key}" class="tab ${filter === key ? 'active' : ''}">${label} <span class="count">${counts[key]}</span></a>`;
-    return html`
-      <div class="pagehead"><h1>Vragen</h1></div>
-      <div class="tabs">${tab('open', 'Open')}${tab('closed', 'Afgerond')}${tab('all', 'Alles')}</div>
-      ${questionList(questions, { isOwner })}
-      <details class="card subtle"><summary>Zelf een vraag/notitie toevoegen</summary>${newQuestionForm(csrf)}</details>`;
-  }
+  const tab = (key, label) =>
+    html`<a href="/?status=${key}" class="tabpill ${filter === key ? 'active' : ''}">${label} <span class="count">${counts[key] || 0}</span></a>`;
   return html`
-    ${newQuestionForm(csrf)}
-    <h2>Mijn vragen</h2>
-    ${questionList(questions, { isOwner })}`;
+    <aside class="chat-sidebar panel">
+      <div class="panel-head"><h1>${isOwner ? 'Vragen' : 'Mijn vragen'}</h1></div>
+      ${isOwner ? html`<div class="tabpills">${tab('open', 'Open')}${tab('closed', 'Afgerond')}${tab('all', 'Alles')}</div>` : ''}
+      ${chatList({ user, questions, activeId, filter })}
+      <div class="sidebar-foot">
+        <a href="/new" class="btn primary pillbtn">${ICON_PLUS} ${isOwner ? 'Zelf een vraag/notitie toevoegen' : 'Nieuwe vraag stellen'}</a>
+      </div>
+    </aside>`;
 }
 
-export function questionPage({ user, csrf, question, messages }) {
+function newQuestionPane(csrf, isOwner) {
+  return html`
+    <section class="chat-pane panel">
+      <div class="chat-head">
+        <a href="/" class="chat-back" aria-label="Terug">←</a>
+        <div class="chat-head-main"><h2>${isOwner ? 'Zelf een vraag/notitie toevoegen' : 'Stel een vraag'}</h2>
+          <p>${isOwner ? 'Alleen voor jezelf, er gaat geen melding uit.' : 'Je krijgt hier antwoord zodra er gereageerd is.'}</p></div>
+      </div>
+      <form method="post" action="/questions" class="stack newq">
+        ${csrfField(csrf)}
+        <label>Onderwerp<input name="title" required maxlength="150" placeholder="Waar gaat het over?" autofocus></label>
+        <label>Je vraag<textarea name="body" required maxlength="10000" rows="7" placeholder="Leg zo goed mogelijk uit wat je wilt weten…"></textarea></label>
+        <div><button class="btn primary pillbtn">Versturen</button></div>
+      </form>
+    </section>`;
+}
+
+function emptyPane(isOwner) {
+  return html`
+    <section class="chat-pane panel chat-pane-empty">
+      <div class="empty-state">
+        <p class="empty-text">${isOwner ? 'Kies een gesprek' : 'Kies een gesprek of stel een vraag'} ${ICON_BUBBLE}</p>
+        <a href="/new" class="btn primary pillbtn">${ICON_PLUS} ${isOwner ? 'Zelf een vraag/notitie toevoegen' : 'Nieuwe vraag stellen'}</a>
+      </div>
+    </section>`;
+}
+
+function conversationPane({ user, csrf, question, messages }) {
   const isOwner = user.role === 'owner';
   const canClose = isOwner || question.user_id === user.id;
+  let lastDay = '';
   return html`
-    <p><a href="/" class="back">← Terug</a></p>
-    <div class="pagehead">
-      <h1>${question.title}</h1>
-      ${statusPill(question.status)}
-    </div>
-    <p class="muted small">Gevraagd door ${question.asker_name || 'verwijderde gebruiker'} · ${fmtDate(question.created_at)}</p>
-
-    <div class="thread">
-      ${messages.map((m) => html`
-        <article class="msg ${m.author_role === 'owner' ? 'msg-owner' : ''} ${m.user_id === user.id ? 'msg-me' : ''}">
-          <header><strong>${m.author_name || 'verwijderde gebruiker'}</strong>${m.author_role === 'owner' ? html` <span class="pill pill-owner">beheerder</span>` : ''}
-            <time title="${fmtDate(m.created_at)}">${timeAgo(m.created_at)}</time></header>
-          <div class="body">${m.body}</div>
-        </article>`)}
-    </div>
-
-    <form method="post" action="/questions/${question.id}/reply" class="card stack">
-      ${csrfField(csrf)}
-      <label>${isOwner ? 'Antwoord' : 'Reageren'}<textarea name="body" required maxlength="10000" rows="4"></textarea></label>
-      <div class="row">
-        <button class="btn primary">Versturen</button>
-        ${isOwner && question.status === 'open' ? html`<button class="btn" name="close" value="1">Versturen &amp; afronden</button>` : ''}
+    <section class="chat-pane panel">
+      <div class="chat-head">
+        <a href="/" class="chat-back" aria-label="Terug">←</a>
+        ${avatar(isOwner ? question.asker_name : question.title, isOwner ? question.user_id : question.id)}
+        <div class="chat-head-main">
+          <h2>${question.title}</h2>
+          <p>${question.asker_name || 'verwijderde gebruiker'} · ${fmtDate(question.created_at)}</p>
+        </div>
+        ${statusPill(question.status)}
+        <details class="menu">
+          <summary aria-label="Meer acties" title="Meer acties">⋯</summary>
+          <div class="menu-items">
+            ${canClose ? html`
+              <form method="post" action="/questions/${question.id}/status">
+                ${csrfField(csrf)}
+                <input type="hidden" name="status" value="${question.status === 'open' ? 'closed' : 'open'}">
+                <button>${question.status === 'open' ? 'Markeer als afgerond' : 'Heropenen'}</button>
+              </form>` : ''}
+            ${isOwner ? html`
+              <form method="post" action="/questions/${question.id}/delete" data-confirm="Dit gesprek en alle berichten definitief verwijderen?">
+                ${csrfField(csrf)}
+                <button class="danger">Gesprek verwijderen</button>
+              </form>` : ''}
+          </div>
+        </details>
       </div>
-    </form>
 
-    <div class="row actions">
-      ${canClose ? html`
-        <form method="post" action="/questions/${question.id}/status" class="inline">
-          ${csrfField(csrf)}
-          <input type="hidden" name="status" value="${question.status === 'open' ? 'closed' : 'open'}">
-          <button class="btn small">${question.status === 'open' ? 'Markeer als afgerond' : 'Heropenen'}</button>
-        </form>` : ''}
-      ${isOwner ? html`
-        <form method="post" action="/questions/${question.id}/delete" class="inline" data-confirm="Deze vraag en alle berichten definitief verwijderen?">
-          ${csrfField(csrf)}
-          <button class="btn small danger">Verwijderen</button>
-        </form>` : ''}
+      <div class="messages" id="messages">
+        ${messages.map((m) => {
+          const mine = m.user_id === user.id;
+          const day = fmtDay(m.created_at);
+          const sep = day !== lastDay ? html`<div class="daysep"><span>${day}</span></div>` : '';
+          lastDay = day;
+          return html`${sep}
+          <div class="bubble-row ${mine ? 'mine' : 'theirs'}">
+            ${mine ? '' : avatar(m.author_name, m.user_id)}
+            <div class="bubble">
+              ${mine ? '' : html`<div class="bubble-name">${m.author_name || 'verwijderde gebruiker'}${m.author_role === 'owner' ? html` <span class="pill pill-owner">beheerder</span>` : ''}</div>`}
+              <div class="bubble-body">${m.body}</div>
+              <time title="${fmtDate(m.created_at)}">${fmtTime(m.created_at)}</time>
+            </div>
+          </div>`;
+        })}
+        ${question.status === 'closed' ? html`<div class="daysep"><span>Gesprek afgerond — een nieuw bericht heropent het</span></div>` : ''}
+      </div>
+
+      <form method="post" action="/questions/${question.id}/reply" class="composer">
+        ${csrfField(csrf)}
+        <textarea name="body" required maxlength="10000" rows="1" placeholder="${isOwner ? 'Typ je antwoord…' : 'Typ een bericht…'}" aria-label="Bericht"></textarea>
+        ${isOwner && question.status === 'open' ? html`<button class="btn pillbtn" name="close" value="1" title="Versturen en gesprek afronden">Afronden</button>` : ''}
+        <button class="btn primary sendbtn" aria-label="Versturen" title="Versturen (Enter)">${ICON_SEND}</button>
+      </form>
+    </section>`;
+}
+
+/** mode: 'empty' | 'new' | 'chat' */
+export function chatPage({ user, csrf, questions, filter, counts, mode, question, messages }) {
+  const isOwner = user.role === 'owner';
+  let pane;
+  if (mode === 'chat') pane = conversationPane({ user, csrf, question, messages });
+  else if (mode === 'new') pane = newQuestionPane(csrf, isOwner);
+  else pane = emptyPane(isOwner);
+  return html`
+    <div class="chat-layout ${mode === 'empty' ? 'show-list' : 'show-pane'}">
+      ${sidebar({ user, questions, activeId: question?.id, filter, counts })}
+      ${pane}
     </div>`;
+}
+
+export function privacyPage({ siteName }) {
+  return html`
+    <section class="card">
+      <h1>Privacy</h1>
+      <p>${siteName} is een besloten site voor mensen die de beheerder persoonlijk kent.</p>
+      <h2>Wat wordt opgeslagen</h2>
+      <ul>
+        <li>Je naam, gebruikersnaam en een versleutelde versie van je wachtwoord.</li>
+        <li>De vragen en berichten die je verstuurt.</li>
+        <li>Een inlog-cookie zodat je ingelogd blijft. Er worden geen tracking- of advertentiecookies gebruikt.</li>
+      </ul>
+      <h2>Wie het kan zien</h2>
+      <p>Alleen jij en de beheerder kunnen jouw gesprekken lezen. Bij een nieuwe vraag of reactie krijgt de beheerder een melding via Discord met je naam en (een deel van) je bericht.</p>
+      <h2>Verwijderen</h2>
+      <p>Wil je dat je account en berichten verwijderd worden? Vraag het de beheerder, dan wordt alles definitief gewist.</p>
+    </section>`;
 }
 
 // ---------- account ----------
@@ -228,6 +336,7 @@ export function settingsPage({ csrf, settings }) {
       ${csrfField(csrf)}
       <h2>Algemeen</h2>
       <label>Naam van de site<input name="site_name" maxlength="50" value="${settings.site_name}"></label>
+      <label>Ondertitel in de footer<input name="site_tagline" maxlength="80" value="${settings.site_tagline}" placeholder="Hulp en Ondersteuning"></label>
       <label>Publieke URL
         <input name="public_url" type="url" placeholder="https://hulp.example.nl" value="${settings.public_url}">
         <span class="hint">Wordt gebruikt voor links in Discord-meldingen en uitnodigingen.</span></label>
